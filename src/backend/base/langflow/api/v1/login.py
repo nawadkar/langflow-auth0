@@ -222,47 +222,111 @@ async def auth0_callback(
             "redirect_uri": f"http://localhost:3000/api/v1/auth0/callback"
         }
         
-        token_response = requests.post(token_url, json=token_payload)
-        token_data = token_response.json()
+        try:
+            token_response = requests.post(token_url, json=token_payload, timeout=10)
+            token_response.raise_for_status()  # Raise exception for non-200 status codes
+            token_data = token_response.json()
+        except requests.RequestException as e:
+            logger.error(f"Error exchanging auth code for token: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Error communicating with Auth0 service"
+            )
         
         if 'error' in token_data:
+            logger.error(f"Auth0 token error: {token_data.get('error_description', 'Unknown error')}")
             raise HTTPException(
                 status_code=400,
-                detail=f"Error exchanging code for token: {token_data['error_description']}"
+                detail=f"Error exchanging code for token: {token_data.get('error_description', 'Unknown error')}"
             )
         
         # Get user info from userinfo endpoint
         userinfo_url = f"https://{auth_settings.AUTH0_DOMAIN}/userinfo"
-        userinfo_response = requests.get(
-            userinfo_url,
-            headers={"Authorization": f"Bearer {token_data['access_token']}"}
-        )
-        user_info = userinfo_response.json()
+        try:
+            userinfo_response = requests.get(
+                userinfo_url,
+                headers={"Authorization": f"Bearer {token_data['access_token']}"},
+                timeout=10
+            )
+            userinfo_response.raise_for_status()
+            user_info = userinfo_response.json()
+        except requests.RequestException as e:
+            logger.error(f"Error fetching user info from Auth0: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Error fetching user information from Auth0"
+            )
         
-        # Create or get user from database
-        user = await get_or_create_user(db, user_info['sub'], user_info.get('email', ''))
+        if not user_info.get('sub'):
+            logger.error("Auth0 user info missing sub claim")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid user information received from Auth0"
+            )
         
-        # Create session tokens
-        session_tokens = await create_user_tokens(user_id=user.id, db=db, update_last_login=True)
-        
-        # Set cookies
-        response.set_cookie(
-            "access_token_lf",
-            session_tokens["access_token"],
-            httponly=auth_settings.ACCESS_HTTPONLY,
-            samesite=auth_settings.ACCESS_SAME_SITE,
-            secure=auth_settings.ACCESS_SECURE,
-            expires=auth_settings.ACCESS_TOKEN_EXPIRE_SECONDS,
-            domain=auth_settings.COOKIE_DOMAIN,
-        )
-        
-        # Redirect to frontend after successful login
-        return RedirectResponse(url="http://localhost:3000")
-        
+        try:
+            # Create or get user from database
+            user = await get_or_create_user(db, user_info['sub'], user_info.get('email', ''))
+            
+            # Create session tokens
+            session_tokens = await create_user_tokens(user_id=user.id, db=db, update_last_login=True)
+            
+            # Set cookies
+            response.set_cookie(
+                "access_token_lf",
+                session_tokens["access_token"],
+                httponly=auth_settings.ACCESS_HTTPONLY,
+                samesite=auth_settings.ACCESS_SAME_SITE,
+                secure=auth_settings.ACCESS_SECURE,
+                expires=auth_settings.ACCESS_TOKEN_EXPIRE_SECONDS,
+                domain=auth_settings.COOKIE_DOMAIN,
+            )
+            
+            response.set_cookie(
+                "refresh_token_lf",
+                session_tokens["refresh_token"],
+                httponly=auth_settings.REFRESH_HTTPONLY,
+                samesite=auth_settings.REFRESH_SAME_SITE,
+                secure=auth_settings.REFRESH_SECURE,
+                expires=auth_settings.REFRESH_TOKEN_EXPIRE_SECONDS,
+                domain=auth_settings.COOKIE_DOMAIN,
+            )
+            
+            # Set API key cookie if available
+            if user.store_api_key:
+                response.set_cookie(
+                    "apikey_tkn_lflw",
+                    str(user.store_api_key),
+                    httponly=auth_settings.ACCESS_HTTPONLY,
+                    samesite=auth_settings.ACCESS_SAME_SITE,
+                    secure=auth_settings.ACCESS_SECURE,
+                    expires=None,  # Session cookie
+                    domain=auth_settings.COOKIE_DOMAIN,
+                )
+            
+            # Initialize user variables and create default folder
+            await get_variable_service().initialize_user_variables(user.id, db)
+            await create_default_folder_if_it_doesnt_exist(db, user.id)
+            
+            # Redirect to frontend after successful login
+            return RedirectResponse(url="http://localhost:3000")
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error processing user data: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Error processing user data"
+            )
+            
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Unexpected error during Auth0 callback: {str(e)}")
         raise HTTPException(
-            status_code=400,
-            detail=f"Error during Auth0 callback: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during authentication"
         )
 
 
