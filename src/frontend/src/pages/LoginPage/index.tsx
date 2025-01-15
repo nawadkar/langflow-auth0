@@ -3,7 +3,7 @@ import { useLoginUser } from "@/controllers/API/queries/auth";
 import { CustomLink } from "@/customization/components/custom-link";
 import { ENABLE_NEW_LOGO } from "@/customization/feature-flags";
 import * as Form from "@radix-ui/react-form";
-import { useContext, useState } from "react";
+import { useContext, useState, useEffect } from "react";
 import InputComponent from "../../components/core/parameterRenderComponent/components/inputComponent";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -20,6 +20,26 @@ import {
 export default function LoginPage(): JSX.Element {
   const [inputState, setInputState] =
     useState<loginInputStateType>(CONTROL_LOGIN_STATE);
+
+  useEffect(() => {
+    const checkAuthType = async () => {
+      try {
+        const response = await fetch('/api/v1/settings/auth');
+        const data = await response.json();
+        
+        if (data.auth_type === 'auth0') {
+          const auth0Response = await fetch('/api/v1/auth0/login');
+          const auth0Data = await auth0Response.json();
+          // Redirect to Auth0's login page
+          window.location.href = auth0Data.auth_url;
+        }
+      } catch (error) {
+        console.error('Error checking auth type:', error);
+      }
+    };
+
+    checkAuthType();
+  }, []);
 
   const { password, username } = inputState;
   const { login } = useContext(AuthContext);

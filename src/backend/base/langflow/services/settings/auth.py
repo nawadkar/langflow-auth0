@@ -52,10 +52,21 @@ class AuthSettings(BaseSettings):
 
     pwd_context: CryptContext = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+    # Add Auth0 settings
+    AUTH0_DOMAIN: str = Field("", description="Auth0 domain")
+    AUTH0_CLIENT_ID: str = Field("", description="Auth0 client ID")
+    AUTH0_CLIENT_SECRET: SecretStr = Field(default=SecretStr(""), description="Auth0 client secret")
+    AUTH0_AUDIENCE: str = Field("", description="Auth0 API audience")
+    AUTH_TYPE: Literal["basic", "auth0"] = "basic"
+
     class Config:
         validate_assignment = True
         extra = "ignore"
         env_prefix = "LANGFLOW_"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        logger.info(f"Auth Settings loaded: AUTH_TYPE={self.AUTH_TYPE}, AUTO_LOGIN={self.AUTO_LOGIN}")
 
     def reset_credentials(self) -> None:
         self.SUPERUSER = DEFAULT_SUPERUSER

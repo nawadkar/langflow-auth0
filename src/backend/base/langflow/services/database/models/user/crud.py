@@ -7,8 +7,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
-
-from langflow.services.database.models.user.model import User, UserUpdate
+from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from langflow.services.database.models.user import User
+from langflow.services.database.models.user.model import UserUpdate
 
 
 async def get_user_by_username(db: AsyncSession, username: str) -> User | None:
@@ -60,3 +63,35 @@ async def update_user_last_login_at(user_id: UUID, db: AsyncSession):
         return await update_user(user, user_data, db)
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error updating user last login at: {e!s}")
+
+
+async def get_or_create_user(db: AsyncSession, auth0_id: str, email: str):
+    """Get or create a user with Auth0 credentials."""
+    try:
+        # Use async query
+        query = select(User).where(User.auth0_id == auth0_id)
+        result = await db.execute(query)
+        user = result.scalar_one_or_none()
+        
+        if not user:
+            # Create new user
+            user = User(
+                auth0_id=auth0_id,
+                email=email,
+                username=email,  # Use email as username
+                password="",  # No password needed for Auth0
+                is_active=True,
+                is_superuser=False
+            )
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        
+        return user
+        
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error creating/getting user: {str(e)}"
+        )
