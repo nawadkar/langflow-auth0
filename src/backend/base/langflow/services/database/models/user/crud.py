@@ -3,13 +3,10 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from loguru import logger
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlalchemy.orm import Session
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 from langflow.services.database.models.user import User
 from langflow.services.database.models.user.model import UserUpdate
 
@@ -68,30 +65,59 @@ async def update_user_last_login_at(user_id: UUID, db: AsyncSession):
 async def get_or_create_user(db: AsyncSession, auth0_id: str, email: str):
     """Get or create a user with Auth0 credentials."""
     try:
-        # Use async query
+        # First try to get the user
         query = select(User).where(User.auth0_id == auth0_id)
         result = await db.execute(query)
         user = result.scalar_one_or_none()
         
-        if not user:
-            # Create new user
-            user = User(
-                auth0_id=auth0_id,
-                email=email,
-                username=email,  # Use email as username
-                password="",  # No password needed for Auth0
-                is_active=True,
-                is_superuser=False
-            )
-            db.add(user)
-            await db.commit()
-            await db.refresh(user)
-        
-        return user
-        
-    except Exception as e:
+        if user:
+            return user
+
+        # User doesn't exist, try to create one
+        try:
+            # Check again in a transaction to handle race conditions
+            async with db.begin():
+                # Double-check the user doesn't exist
+                query = select(User).where(User.auth0_id == auth0_id)
+                result = await db.execute(query)
+                user = result.scalar_one_or_none()
+                
+                if not user:
+                    # Create new user
+                    user = User(
+                        auth0_id=auth0_id,
+                        email=email,
+                        username=email,  # Use email as username
+                        password="",  # No password needed for Auth0
+                        is_active=True,
+                        is_superuser=False
+                    )
+                    db.add(user)
+                    await db.flush()  # Ensure we can get the user ID
+                    
+                return user
+
+        except IntegrityError as e:
+            logger.warning(f"Race condition detected creating user {auth0_id}: {str(e)}")
+            # If we hit a race condition, try one more time to get the user
+            query = select(User).where(User.auth0_id == auth0_id)
+            result = await db.execute(query)
+            user = result.scalar_one_or_none()
+            if user:
+                return user
+            raise  # Re-raise if we still can't find the user
+            
+    except SQLAlchemyError as e:
+        logger.error(f"Database error in get_or_create_user: {str(e)}")
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error creating/getting user: {str(e)}"
+            detail="Database error occurred while processing user"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in get_or_create_user: {str(e)}")
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while processing user"
         )
